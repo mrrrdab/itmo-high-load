@@ -22,6 +22,12 @@ class LeakingBucketRateLimiter(
         return queue.offer(1)
     }
 
+    fun tickBlocking() {
+        while (!tick()) {
+            Thread.sleep(10)
+        }
+    }
+
     private val releaseJob = rateLimiterScope.launch {
         while (true) {
             delay(window.toMillis())

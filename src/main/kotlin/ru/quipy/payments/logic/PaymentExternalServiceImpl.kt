@@ -9,6 +9,7 @@ import org.slf4j.LoggerFactory
 import ru.quipy.core.EventSourcingService
 import ru.quipy.payments.api.PaymentAggregate
 import ru.quipy.common.utils.LeakingBucketRateLimiter
+import ru.quipy.common.utils.OngoingWindow
 import java.net.SocketTimeoutException
 import java.time.Duration
 import java.util.*
@@ -36,6 +37,7 @@ class PaymentExternalSystemAdapterImpl(
     private val client = OkHttpClient.Builder().build()
 
     private val rateLimiter = LeakingBucketRateLimiter(rateLimitPerSec.toLong(), Duration.ofSeconds(1), rateLimitPerSec)
+    private val ongoingWindow = OngoingWindow(parallelRequests)
 
     override fun performPaymentAsync(paymentId: UUID, amount: Int, paymentStartedAt: Long, deadline: Long) {
         logger.warn("[$accountName] Submitting payment request for payment $paymentId")
@@ -53,6 +55,8 @@ class PaymentExternalSystemAdapterImpl(
         }.build()
 
         try {
+            ongoingWindow.acquire()
+
             if (!rateLimiter.tick()) {
                 logger.warn("[$accountName] Rate limit exceeded, payment $paymentId delayed")
                 rateLimiter.tickBlocking()
@@ -89,6 +93,8 @@ class PaymentExternalSystemAdapterImpl(
                     }
                 }
             }
+        } finally {
+            ongoingWindow.release()
         }
     }
 

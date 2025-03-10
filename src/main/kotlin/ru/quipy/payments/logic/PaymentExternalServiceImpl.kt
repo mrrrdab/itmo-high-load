@@ -8,7 +8,7 @@ import okhttp3.RequestBody
 import org.slf4j.LoggerFactory
 import ru.quipy.core.EventSourcingService
 import ru.quipy.payments.api.PaymentAggregate
-import ru.quipy.common.utils.LeakingBucketRateLimiter
+import ru.quipy.common.utils.SlidingWindowRateLimiter
 import ru.quipy.common.utils.OngoingWindow
 import java.net.SocketTimeoutException
 import java.time.Duration
@@ -36,14 +36,14 @@ class PaymentExternalSystemAdapterImpl(
 
     private val client = OkHttpClient.Builder().build()
 
-    private val rateLimiter = LeakingBucketRateLimiter(rateLimitPerSec.toLong(), Duration.ofSeconds(1), rateLimitPerSec)
+    private val rateLimiter = SlidingWindowRateLimiter(rateLimitPerSec.toLong(), Duration.ofSeconds(1))
     private val ongoingWindow = OngoingWindow(parallelRequests)
 
     override fun performPaymentAsync(paymentId: UUID, amount: Int, paymentStartedAt: Long, deadline: Long) {
         logger.warn("[$accountName] Submitting payment request for payment $paymentId")
 
         val transactionId = UUID.randomUUID()
-        logger.info("[$accountName] Submit for $paymentId, txId: $transactionId")
+        logger.info("[$accountName] Submit for $paymentId, txId: $transactionId.")
 
         paymentESService.update(paymentId) {
             it.logSubmission(success = true, transactionId, now(), Duration.ofMillis(now() - paymentStartedAt))
@@ -55,10 +55,18 @@ class PaymentExternalSystemAdapterImpl(
         }.build()
 
         try {
-            ongoingWindow.acquire()
+            if (!ongoingWindow.tryAcquire(deadline)) {
+                logger.warn("[$accountName] Rate limit exceeded, payment $paymentId delayed.")
+
+                paymentESService.update(paymentId) {
+                    it.logSubmission(success = false, transactionId, now(), Duration.ofMillis(now() - paymentStartedAt))
+                }
+
+                return;
+            }
 
             if (!rateLimiter.tick()) {
-                logger.warn("[$accountName] Rate limit exceeded, payment $paymentId delayed")
+                logger.warn("[$accountName] Rate limit exceeded, payment $paymentId delayed.")
                 rateLimiter.tickBlocking()
             }
 

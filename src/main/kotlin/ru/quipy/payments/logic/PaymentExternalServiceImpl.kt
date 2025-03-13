@@ -13,6 +13,8 @@ import ru.quipy.common.utils.OngoingWindow
 import java.net.SocketTimeoutException
 import java.time.Duration
 import java.util.*
+import kotlin.math.min
+import kotlin.math.max
 
 
 // Advice: always treat time as a Duration
@@ -54,55 +56,80 @@ class PaymentExternalSystemAdapterImpl(
             post(emptyBody)
         }.build()
 
-        try {
-            if (!ongoingWindow.tryAcquire(deadline)) {
-                logger.warn("[$accountName] Rate limit exceeded, payment $paymentId delayed.")
+        var curRetry = 0
+        val maxRetries = (deadline - paymentStartedAt) / requestAverageProcessingTime.toMillis()
+        var delay = requestAverageProcessingTime.toMillis() / 4
 
-                paymentESService.update(paymentId) {
-                    it.logSubmission(success = false, transactionId, now(), Duration.ofMillis(now() - paymentStartedAt))
-                }
-
-                return;
-            }
-
-            if (!rateLimiter.tick()) {
-                logger.warn("[$accountName] Rate limit exceeded, payment $paymentId delayed.")
-                rateLimiter.tickBlocking()
-            }
-
-            client.newCall(request).execute().use { response ->
-                val body = try {
-                    mapper.readValue(response.body?.string(), ExternalSysResponse::class.java)
-                } catch (e: Exception) {
-                    logger.error("[$accountName] [ERROR] Payment processed for txId: $transactionId, payment: $paymentId, result code: ${response.code}, reason: ${response.body?.string()}")
-                    ExternalSysResponse(transactionId.toString(), paymentId.toString(),false, e.message)
-                }
-
-                logger.warn("[$accountName] Payment processed for txId: $transactionId, payment: $paymentId, succeeded: ${body.result}, message: ${body.message}")
-
-                paymentESService.update(paymentId) {
-                    it.logProcessing(body.result, now(), transactionId, reason = body.message)
-                }
-            }
-        } catch (e: Exception) {
-            when (e) {
-                is SocketTimeoutException -> {
-                    logger.error("[$accountName] Payment timeout for txId: $transactionId, payment: $paymentId", e)
-                    paymentESService.update(paymentId) {
-                        it.logProcessing(false, now(), transactionId, reason = "Request timeout.")
-                    }
-                }
-
-                else -> {
-                    logger.error("[$accountName] Payment failed for txId: $transactionId, payment: $paymentId", e)
+        while (curRetry < maxRetries) {
+            try {
+                if (!ongoingWindow.tryAcquire(deadline - now())) {
+                    logger.error("[$accountName] Deadline exceeded, payment $paymentId canceled.")
 
                     paymentESService.update(paymentId) {
-                        it.logProcessing(false, now(), transactionId, reason = e.message)
+                        it.logProcessing(false, now(), transactionId, reason = "Deadline exceeded.")
+                    }
+
+                    return
+                }
+
+                if (!rateLimiter.tick()) {
+                    logger.warn("[$accountName] Rate limit exceeded, payment $paymentId delayed.")
+                    rateLimiter.tickBlocking()
+                }
+
+                if (now() + requestAverageProcessingTime.toMillis() >= deadline) {
+                    logger.error("[$accountName] Deadline exceeded, payment $paymentId canceled.")
+
+                    paymentESService.update(paymentId) {
+                        it.logProcessing(false, now(), transactionId, reason = "Deadline exceeded.")
+                    }
+    
+                    return
+                }
+
+                client.newCall(request).execute().use { response ->
+                    val body = try {
+                        mapper.readValue(response.body?.string(), ExternalSysResponse::class.java)
+                    } catch (e: Exception) {
+                        logger.error("[$accountName] [ERROR] Payment processed for txId: $transactionId, payment: $paymentId, result code: ${response.code}, reason: ${response.body?.string()}")
+                        ExternalSysResponse(transactionId.toString(), paymentId.toString(), false, e.message)
+                    }
+    
+                    logger.warn("[$accountName] Payment processed for txId: $transactionId, payment: $paymentId, succeeded: ${body.result}, message: ${body.message}")
+    
+                    paymentESService.update(paymentId) {
+                        it.logProcessing(body.result, now(), transactionId, reason = body.message)
+                    }
+
+                    if (body.result) {
+                        return
+                    }
+
+                    if (response.code !in listOf(429, 500, 502, 503, 504)) {
+                        logger.warn("[$accountName] Non-retriable error for $paymentId, stopping retries.")
+                        return
                     }
                 }
+            } catch (e: SocketTimeoutException) {
+                logger.error("[$accountName] Payment timeout for txId: $transactionId, payment: $paymentId", e)
+            } catch (e: Exception) {
+                logger.error("[$accountName] Payment failed for txId: $transactionId, payment: $paymentId", e)
+                return
+            } finally {
+                ongoingWindow.release()
             }
-        } finally {
-            ongoingWindow.release()
+
+            logger.warn("[$accountName] Retrying payment $paymentId in $delay ms (attempt $curRetry/$maxRetries).")
+            Thread.sleep(delay)
+            
+            delay = delay * 2
+            curRetry++
+        }
+
+        logger.error("[$accountName] Payment $paymentId failed after $maxRetries attempts.")
+
+        paymentESService.update(paymentId) {
+            it.logProcessing(false, now(), transactionId, reason = "Max retries reached or deadline exceeded.")
         }
     }
 

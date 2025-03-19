@@ -28,6 +28,8 @@ class PaymentExternalSystemAdapterImpl(
 
         val emptyBody = RequestBody.create(null, ByteArray(0))
         val mapper = ObjectMapper().registerKotlinModule()
+
+        val RETRIABLE_ERROR_CODES = listOf(429, 500, 502, 503, 504)
     }
 
     private val serviceName = properties.serviceName
@@ -105,7 +107,7 @@ class PaymentExternalSystemAdapterImpl(
                         return
                     }
 
-                    if (response.code !in listOf(429, 500, 502, 503, 504)) {
+                    if (response.code !in RETRIABLE_ERROR_CODES) {
                         logger.warn("[$accountName] Non-retriable error for $paymentId, stopping retries.")
                         return
                     }

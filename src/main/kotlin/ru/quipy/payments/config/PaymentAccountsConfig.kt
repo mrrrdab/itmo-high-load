@@ -27,6 +27,9 @@ class PaymentAccountsConfig {
         private val mapper = ObjectMapper().registerKotlinModule().registerModules(JavaTimeModule())
     }
 
+    @Value("\${payment.hostPort}")
+    lateinit var paymentProviderHostPort: String
+
     private val allowedAccounts = setOf("acc-8")
 
     @Bean

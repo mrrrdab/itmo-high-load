@@ -26,8 +26,15 @@ Content-Type: application/json
 # }
 
 # == Case 4 ==
+# {
+#   "ratePerSecond": 7,
+#   "testCount": 800,
+#   "processingTimeMillis": 3500
+# }
+
+# == Case 5 ==
 {
-  "ratePerSecond": 7,
-  "testCount": 800,
-  "processingTimeMillis": 3500
+  "ratePerSecond": 5,
+  "testCount": 1000,
+  "processingTimeMillis": 6000
 }

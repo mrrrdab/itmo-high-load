@@ -2,7 +2,7 @@ POST http://127.0.0.1:1234/test/run
 Content-Type: application/json
 
 
-# # == Case 1 ==
+# # == Case 1 (acc-3) ==
 # {
 #   "ratePerSecond": 2,
 #   "testCount": 10,
@@ -11,30 +11,44 @@ Content-Type: application/json
 #   "testCount": 1200
 # }
 
-# # == Case 2 ==
+# # == Case 2 (acc-5) ==
 # {
 #   "ratePerSecond": 2,
 #   "testCount": 100,
 #   "processingTimeMillis": 60000
 # }
 
-# == Case 3 ==
+# == Case 3 (acc-5) ==
 # {
 #   "ratePerSecond": 2,
 #   "testCount": 500,
 #   "processingTimeMillis": 60000
 # }
 
-# == Case 4 ==
+# == Case 4 (acc-8) ==
 # {
 #   "ratePerSecond": 7,
 #   "testCount": 800,
 #   "processingTimeMillis": 3500
 # }
 
-# == Case 5 ==
+# == Case 5 (acc-7) ==
+# {
+#   "ratePerSecond": 5,
+#   "testCount": 1000,
+#   "processingTimeMillis": 6000
+# }
+
+# == Case 6 (acc-9) ==
 {
-  "ratePerSecond": 5,
-  "testCount": 1000,
-  "processingTimeMillis": 6000
+  "ratePerSecond": 100,
+  "testCount": 5000,
+  "processingTimeMillis": 20000
 }
+
+# == Case-Bonus 1 (acc-16) ==
+# {
+#   "ratePerSecond": 5,
+#   "testCount": 800,
+#   "processingTimeMillis": 5000
+# }

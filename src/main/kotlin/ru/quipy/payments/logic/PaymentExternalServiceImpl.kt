@@ -28,6 +28,10 @@ class PaymentExternalSystemAdapterImpl(
         val mapper = ObjectMapper().registerKotlinModule()
 
         val RETRIABLE_ERROR_CODES = listOf(429, 500, 502, 503, 504)
+
+        val MAX_CORE_THREAD_COUNT = 100
+        val MAX_THREAD_COUNT = 500
+        val WORK_QUEUE_SIZE = 5000
     }
 
     private val serviceName = properties.serviceName
@@ -36,60 +40,73 @@ class PaymentExternalSystemAdapterImpl(
     private val rateLimitPerSec = properties.rateLimitPerSec
     private val parallelRequests = properties.parallelRequests
 
-    private val client = OkHttpClient.Builder().build()
+    private val client = OkHttpClient.Builder().callTimeout(Duration.ofMillis(requestAverageProcessingTime * 2)).build()
 
     private val rateLimiter = SlidingWindowRateLimiter(rateLimitPerSec.toLong(), Duration.ofSeconds(1))
     private val ongoingWindow = OngoingWindow(parallelRequests)
 
+    private val threadCount = ((rateLimitPerSec / (1000.0 / requestAverageProcessingTime)).toInt()).coerceAtLeast(1).coerceAtMost(MAX_CORE_THREAD_COUNT)
+    private val executorService = ThreadPoolExecutor(
+        threadCount,
+        threadCount,
+        0,
+        TimeUnit.MINUTES,
+        LinkedBlockingQueue<Runnable>(WORK_QUEUE_SIZE),
+        Executors.defaultThreadFactory(),
+        ThreadPoolExecutor.DiscardPolicy()
+    )
+
     override fun performPaymentAsync(paymentId: UUID, amount: Int, paymentStartedAt: Long, deadline: Long) {
         logger.warn("[$accountName] Submitting payment request for payment $paymentId")
 
-        val transactionId = UUID.randomUUID()
-        val idempotencyKey = UUID.randomUUID().toString()
-        logger.info("[$accountName] Submit for $paymentId, txId: $transactionId, idKey: $idempotencyKey")
+        executorService.submit {
+            val transactionId = UUID.randomUUID()
+            val idempotencyKey = UUID.randomUUID().toString()
+            logger.info("[$accountName] Submit for $paymentId, txId: $transactionId, idKey: $idempotencyKey")
 
-        paymentESService.update(paymentId) {
-            it.logSubmission(success = true, transactionId, now(), Duration.ofMillis(now() - paymentStartedAt))
-        }
-
-        val request = buildRequest(paymentId, amount, transactionId, idempotencyKey)
-
-        var curRetry = 0
-        val maxRetries = ((deadline - paymentStartedAt) / requestAverageProcessingTime).toInt()
-        var delay = requestAverageProcessingTime / 8
-
-        while (curRetry < maxRetries) {
-            try {
-                val body = executeHedgedRequest(client, request, mapper, accountName, transactionId, paymentId, requestAverageProcessingTime * 2, deadline, requestAverageProcessingTime * 2)
-
-                logger.warn("[$accountName] Payment processed for txId: $transactionId, payment: $paymentId, succeeded: ${body.result}, message: ${body.message}")
-    
-                paymentESService.update(paymentId) {
-                    it.logProcessing(body.result, now(), transactionId, reason = body.message)
-                }
-
-                if (body.result) {
-                    return
-                }
-
-                if (body.httpResponseCode != null && body.httpResponseCode !in RETRIABLE_ERROR_CODES) {
-                    logger.warn("[$accountName] Non-retriable error for $paymentId, stopping retries.")
-                    return
-                }
-            } catch (e: SocketTimeoutException) {
-                logger.error("[$accountName] Payment timeout for txId: $transactionId, payment: $paymentId", e)
-            } catch (e: Exception) {
-                logger.error("[$accountName] Payment failed for txId: $transactionId, payment: $paymentId", e)
-                return
-            } finally {
-                ongoingWindow.release()
+            paymentESService.update(paymentId) {
+                it.logSubmission(success = true, transactionId, now(), Duration.ofMillis(now() - paymentStartedAt))
             }
 
-            logger.warn("[$accountName] Retrying payment $paymentId in $delay ms (attempt $curRetry/$maxRetries).")
-            Thread.sleep(delay)
+            val request = buildRequest(paymentId, amount, transactionId, idempotencyKey, requestAverageProcessingTime * 2)
 
-            delay *= 2
-            curRetry++
+            var curRetry = 0
+            val maxRetries = ((deadline - paymentStartedAt) / requestAverageProcessingTime).toInt()
+            var delay = requestAverageProcessingTime / 8
+
+            while (curRetry < maxRetries) {
+                try {
+                    val body = executeHedgedRequest(client, request, mapper, accountName, transactionId, paymentId, requestAverageProcessingTime * 2, deadline, requestAverageProcessingTime * 2)
+
+                    logger.warn("[$accountName] Payment processed for txId: $transactionId, payment: $paymentId, succeeded: ${body.result}, message: ${body.message}")
+        
+                    paymentESService.update(paymentId) {
+                        it.logProcessing(body.result, now(), transactionId, reason = body.message)
+                    }
+
+                    if (body.result) {
+                        return@submit
+                    }
+
+                    if (body.httpResponseCode != null && body.httpResponseCode !in RETRIABLE_ERROR_CODES) {
+                        logger.warn("[$accountName] Non-retriable error for $paymentId, stopping retries.")
+                        return@submit
+                    }
+                } catch (e: SocketTimeoutException) {
+                    logger.error("[$accountName] Payment timeout for txId: $transactionId, payment: $paymentId", e)
+                } catch (e: Exception) {
+                    logger.error("[$accountName] Payment failed for txId: $transactionId, payment: $paymentId", e)
+                    return@submit
+                } finally {
+                    ongoingWindow.release()
+                }
+
+                logger.warn("[$accountName] Retrying payment $paymentId in $delay ms (attempt $curRetry/$maxRetries).")
+                Thread.sleep(delay)
+
+                delay *= 2
+                curRetry++
+            }
         }
     }
 
@@ -191,7 +208,7 @@ class PaymentExternalSystemAdapterImpl(
         return false
     }
 
-    private fun buildRequest(paymentId: UUID, amount: Int, transactionId: UUID, idempotencyKey: String): Request {
+    private fun buildRequest(paymentId: UUID, amount: Int, transactionId: UUID, idempotencyKey: String, timeout: Long): Request {
         return Request.Builder().run {
             url(
                 "http://localhost:1234/external/process?" +
@@ -199,7 +216,8 @@ class PaymentExternalSystemAdapterImpl(
                 "accountName=${accountName}&" +
                 "transactionId=$transactionId&" +
                 "paymentId=$paymentId&" +
-                "amount=$amount&"
+                "amount=$amount&" +
+                "timeout=${Duration.ofMillis(timeout)}"
             )
             addHeader("x-idempotency-key", idempotencyKey)
             post(emptyBody)
@@ -211,7 +229,6 @@ class PaymentExternalSystemAdapterImpl(
     override fun isEnabled() = properties.enabled
 
     override fun name() = properties.accountName
-
 }
 
 public fun now() = System.currentTimeMillis()

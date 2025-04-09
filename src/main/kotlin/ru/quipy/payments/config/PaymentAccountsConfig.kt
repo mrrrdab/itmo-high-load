@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.ObjectMapper
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule
 import com.fasterxml.jackson.module.kotlin.registerKotlinModule
 import org.eclipse.jetty.http2.server.HTTP2CServerConnectionFactory
+import org.apache.coyote.http2.Http2Protocol
 import org.springframework.beans.factory.annotation.Value
 import org.springframework.boot.web.embedded.jetty.JettyServerCustomizer
 import org.springframework.boot.web.embedded.jetty.JettyServletWebServerFactory
@@ -30,7 +31,7 @@ class PaymentAccountsConfig {
     @Value("\${payment.hostPort}")
     lateinit var paymentProviderHostPort: String
 
-    private val allowedAccounts = setOf("acc-9")
+    private val allowedAccounts = setOf("acc-12")
 
     @Bean
     fun accountAdapters(paymentService: EventSourcingService<UUID, PaymentAggregate, PaymentAggregateState>): List<PaymentExternalSystemAdapter> {
@@ -51,4 +52,25 @@ class PaymentAccountsConfig {
             }.onEach(::println)
             .map { PaymentExternalSystemAdapterImpl(it, paymentService) }
     }
+
+    @Bean
+    fun tomcatConnectorCustomizer(): TomcatConnectorCustomizer {
+        return TomcatConnectorCustomizer {
+            try {
+                (it.protocolHandler.findUpgradeProtocols().get(0) as Http2Protocol).maxConcurrentStreams = 10_000_000
+            } catch (e: Exception) { }
+        }
+    }
+
+    // @Bean
+    //  fun jettyServerCustomizer(): JettyServletWebServerFactory {
+    //      val jettyServletWebServerFactory = JettyServletWebServerFactory()
+ 
+    //      val c = JettyServerCustomizer {
+    //          (it.connectors[0].getConnectionFactory("h2c") as HTTP2CServerConnectionFactory).maxConcurrentStreams = 1_000_000
+    //      }
+ 
+    //      jettyServletWebServerFactory.serverCustomizers.add(c)
+    //      return jettyServletWebServerFactory
+    //  }
 }
